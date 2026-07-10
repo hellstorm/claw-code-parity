@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vérificateur d'intégrité firmware iDRAC Dell</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🛡️ Vérificateur d'intégrité firmware — iDRAC Dell</h1>
+    <p class="subtitle">
+      Compare les firmwares installés à la dernière version du catalogue officiel Dell.
+    </p>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <form id="scan-form" autocomplete="off">
+        <div class="grid">
+          <label>
+            Adresse IP de l'iDRAC
+            <input type="text" name="ip" id="ip" placeholder="192.168.1.120" required />
+          </label>
+          <label>
+            Nom d'utilisateur
+            <input type="text" name="username" id="username" placeholder="root" required />
+          </label>
+          <label>
+            Mot de passe
+            <input type="password" name="password" id="password" placeholder="••••••••" />
+          </label>
+          <label>
+            Transport
+            <select name="transport" id="transport">
+              <option value="redfish">Redfish (API HTTP)</option>
+              <option value="racadm">racadm (CLI)</option>
+              <option value="auto">Auto (Redfish puis racadm)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row-actions">
+          <label class="checkbox">
+            <input type="checkbox" name="verify_ssl" id="verify_ssl" />
+            Vérifier le certificat TLS (décoché = certificat auto-signé accepté)
+          </label>
+          <button type="submit" id="scan-btn">Analyser</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="status-panel" class="status-panel" hidden></section>
+
+    <section class="card table-card" id="results-card" hidden>
+      <div class="summary" id="summary"></div>
+      <div class="table-wrap">
+        <table id="results">
+          <thead>
+            <tr>
+              <th>Firmware</th>
+              <th>Type</th>
+              <th>Version installée</th>
+              <th>Version officielle</th>
+              <th>Hash de référence (paquet)</th>
+              <th>État</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+      <p class="note">
+        ⚠️ Le hash affiché est le MD5 du <strong>paquet de mise à jour officiel</strong> Dell
+        (référence de téléchargement). L'iDRAC n'expose pas de hash du firmware en cours
+        d'exécution ; l'état d'intégrité repose donc sur la comparaison de version.
+      </p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Application autonome — les identifiants ne sont ni stockés ni journalisés.
+  </footer>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
