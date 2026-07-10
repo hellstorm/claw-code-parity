@@ -67,7 +67,7 @@ function addRow(row) {
       : `<span class="no-action">—</span>`;
 
   const hash = row.reference_hash
-    ? `<span class="hash">${escapeHtml(row.reference_hash)}</span>`
+    ? `<span class="hash" title="${escapeHtml(row.reference_hash)}">${escapeHtml(row.reference_hash)}</span>`
     : `<span class="no-action">—</span>`;
 
   tr.innerHTML =

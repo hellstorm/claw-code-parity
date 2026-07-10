@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+scratch_*.py
+preview_*.png
