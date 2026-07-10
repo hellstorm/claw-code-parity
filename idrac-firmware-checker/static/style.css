@@ -250,6 +250,30 @@ th.col-integrity { color: var(--text); }
 .update-btn:hover { filter: brightness(1.1); }
 .no-action { color: var(--muted); font-size: .82rem; }
 
+.action-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .1rem;
+}
+.verify-btn {
+  display: inline-block;
+  margin-top: .3rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--info);
+  padding: .3rem .6rem;
+  font-size: .78rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.verify-btn:hover { border-color: var(--info); }
+.verify-result { display: block; margin-top: .3rem; font-size: .76rem; }
+.verify-result.pending { color: var(--muted); }
+.verify-result.ok-text { color: var(--ok); font-weight: 600; }
+.verify-result.bad-text { color: var(--bad); font-weight: 600; }
+
 .note {
   margin-top: 1rem;
   font-size: .8rem;

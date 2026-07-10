@@ -21,9 +21,11 @@ from compare import (  # noqa: E402
     compute_integrity,
     compute_update,
 )
-from idrac_client import FirmwareEntry, IdracClient, _match_attestation  # noqa: E402
+import catalog as catalog_mod  # noqa: E402
+from idrac_client import FirmwareEntry, IdracClient, _is_bios, _match_attestation  # noqa: E402
 from matching import version_ge, version_key, versions_equal  # noqa: E402
 import spdm  # noqa: E402
+import tpm  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 SAMPLE = os.path.join(ROOT, "sample_catalog.xml")
@@ -216,6 +218,90 @@ def test_match_attestation_by_substring():
     records = [spdm.AttestationRecord(target_name="RAID.Slot.1-1", authenticity="authentic")]
     m = _match_attestation("Dell PERC H755 RAID.Slot.1-1 Controller", records)
     assert m is not None and m.authenticity == "authentic"
+
+
+# --- Attestation TPM/PCR (BIOS) --------------------------------------------
+def _tpm_detail(pcr_values):
+    return {
+        "ComponentIntegrityType": "TPM",
+        "TargetComponentURI": {"@odata.id": "/redfish/v1/Systems/System.Embedded.1"},
+        "TPM": {
+            "IdentityAuthentication": {"VerificationStatus": "Success"},
+            "MeasurementSet": {
+                "HashAlgorithm": "SHA256",
+                "Measurements": [
+                    {"PCRIndex": idx, "Digest": val} for idx, val in pcr_values.items()
+                ],
+            },
+        },
+    }
+
+
+def test_tpm_pcr_digest_stable_and_sensitive():
+    good = {0: "aa" * 32, 1: "bb" * 32, 7: "cc" * 32}
+    d1, algo = tpm.extract_pcr_digest(_tpm_detail(good))
+    d2, _ = tpm.extract_pcr_digest(_tpm_detail(dict(good)))
+    assert d1 and d1 == d2  # déterministe
+    assert algo == "SHA256"
+    tampered = {**good, 0: "dd" * 32}  # PCR0 (BIOS) altéré
+    d3, _ = tpm.extract_pcr_digest(_tpm_detail(tampered))
+    assert d3 != d1
+
+
+def test_tpm_pcr_digest_ignores_out_of_range_pcr():
+    # Un PCR hors périmètre BIOS (ex. 15) ne doit pas entrer dans l'empreinte.
+    base = {0: "aa" * 32}
+    d_base, _ = tpm.extract_pcr_digest(_tpm_detail(base))
+    d_extra, _ = tpm.extract_pcr_digest(_tpm_detail({**base, 15: "ee" * 32}))
+    assert d_base == d_extra
+
+
+def test_tpm_pcr_digest_empty_when_absent():
+    assert tpm.extract_pcr_digest({"TPM": {}}) == ("", "")
+
+
+def test_is_bios_detection():
+    assert _is_bios(FirmwareEntry(name="BIOS", version="2.10.0", component_type="BIOS"))
+    assert _is_bios(FirmwareEntry(name="System BIOS", version="1.0"))
+    assert not _is_bios(FirmwareEntry(name="Broadcom NIC", version="1.0"))
+
+
+# --- Vérification du paquet DUP --------------------------------------------
+class _FakeResp:
+    def __init__(self, chunks, status_code=200):
+        self._chunks = chunks
+        self.status_code = status_code
+
+    def iter_content(self, chunk_size):
+        for c in self._chunks:
+            yield c
+
+    def close(self):
+        pass
+
+
+def test_verify_dup_conforme(monkeypatch):
+    import hashlib
+
+    payload = b"DELL-DUP-CONTENT-EXAMPLE" * 100
+    md5 = hashlib.md5(payload).hexdigest()
+    monkeypatch.setattr(catalog_mod.requests, "get", lambda *a, **k: _FakeResp([payload]))
+    conforme, computed, size = catalog_mod.verify_dup("https://x/dup.exe", md5)
+    assert conforme is True
+    assert computed == md5
+    assert size == len(payload)
+
+
+def test_verify_dup_non_conforme(monkeypatch):
+    monkeypatch.setattr(catalog_mod.requests, "get", lambda *a, **k: _FakeResp([b"altered"]))
+    conforme, computed, _ = catalog_mod.verify_dup("https://x/dup.exe", "00" * 16)
+    assert conforme is False
+    assert computed != "00" * 16
+
+
+def test_verify_dup_requires_expected_hash():
+    with pytest.raises(catalog_mod.CatalogError):
+        catalog_mod.verify_dup("https://x/dup.exe", "")
 
 
 # --- racadm -----------------------------------------------------------------

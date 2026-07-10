@@ -109,9 +109,57 @@ function updateCell(row) {
 function actionCell(row) {
   if (row.update === "available" && row.download_url) {
     const t = row.package_hash ? `MD5 du paquet : ${row.package_hash}` : "";
-    return `<a class="update-btn" href="${escapeHtml(row.download_url)}" target="_blank" rel="noopener" title="${escapeHtml(t)}">⬇ Télécharger la mise à jour</a>`;
+    let html =
+      `<div class="action-stack"><a class="update-btn" href="${escapeHtml(row.download_url)}" target="_blank" rel="noopener" title="${escapeHtml(t)}">⬇ Télécharger la mise à jour</a>`;
+    if (row.package_hash) {
+      html +=
+        `<button type="button" class="verify-btn"` +
+        ` data-url="${escapeHtml(row.download_url)}" data-md5="${escapeHtml(row.package_hash)}"` +
+        ` title="Télécharge le paquet et vérifie son MD5 officiel Dell.">🔎 Vérifier le paquet</button>` +
+        `<span class="verify-result"></span>`;
+    }
+    return html + `</div>`;
   }
   return `<span class="no-action">—</span>`;
+}
+
+// Vérification DUP : délégation d'événement sur le corps du tableau.
+resultsBody.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".verify-btn");
+  if (!btn) return;
+  const out = btn.parentElement.querySelector(".verify-result");
+  btn.disabled = true;
+  out.className = "verify-result pending";
+  out.textContent = " ⏳ téléchargement & calcul MD5…";
+  try {
+    const resp = await fetch("/api/verify-dup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: btn.dataset.url, md5: btn.dataset.md5 }),
+    });
+    const data = await resp.json();
+    if (!data.ok) {
+      out.className = "verify-result bad-text";
+      out.textContent = " ✖ " + (data.error || "échec");
+    } else if (data.conforme) {
+      out.className = "verify-result ok-text";
+      out.textContent = ` ✔ paquet conforme (${fmtSize(data.size)})`;
+    } else {
+      out.className = "verify-result bad-text";
+      out.textContent = " ✖ MD5 non conforme : " + data.computed;
+    }
+  } catch (err) {
+    out.className = "verify-result bad-text";
+    out.textContent = " ✖ erreur : " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function fmtSize(bytes) {
+  if (!bytes) return "0 o";
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? mb.toFixed(1) + " Mo" : (bytes / 1024).toFixed(0) + " Ko";
 }
 
 function addRow(row) {

@@ -23,8 +23,10 @@ from typing import Iterator
 
 from flask import Flask, Response, render_template, request, stream_with_context
 
+from flask import jsonify
+
 from baseline import load_baseline
-from catalog import CatalogError, load_catalog
+from catalog import CatalogError, load_catalog, verify_dup
 from compare import CatalogIndex, build_row
 from idrac_client import IdracClient, IdracError
 
@@ -151,6 +153,29 @@ def scan() -> Response:
         yield _sse_free_line({"type": "done", "message": "Analyse terminée."})
 
     return Response(stream_with_context(generate()), mimetype="application/x-ndjson")
+
+
+@app.route("/api/verify-dup", methods=["POST"])
+def verify_dup_route() -> Response:
+    """Vérifie qu'un paquet DUP téléchargé correspond au MD5 officiel Dell."""
+    payload = request.get_json(silent=True) or {}
+    url = (payload.get("url") or "").strip()
+    md5 = (payload.get("md5") or "").strip()
+    if not url or not md5:
+        return jsonify({"ok": False, "error": "URL et hash de référence requis."}), 400
+    try:
+        conforme, computed, size = verify_dup(url, md5)
+    except CatalogError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    return jsonify(
+        {
+            "ok": True,
+            "conforme": conforme,
+            "computed": computed,
+            "expected": md5.lower(),
+            "size": size,
+        }
+    )
 
 
 @app.route("/healthz")

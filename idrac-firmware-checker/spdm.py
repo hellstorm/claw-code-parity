@@ -105,11 +105,16 @@ def target_name(detail: dict) -> str:
     return str(detail.get("Id") or detail.get("Name") or "")
 
 
+def action_target(detail: dict, action_name: str) -> str:
+    """URI ``target`` d'une action Redfish nommée, si exposée."""
+    actions = detail.get("Actions") or {}
+    action = actions.get(action_name) or {}
+    return action.get("target", "")
+
+
 def signed_measurements_action_target(detail: dict) -> str:
     """URI de l'action SPDMGetSignedMeasurements, si exposée."""
-    actions = detail.get("Actions") or {}
-    action = actions.get(SIGNED_MEASUREMENTS_ACTION) or {}
-    return action.get("target", "")
+    return action_target(detail, SIGNED_MEASUREMENTS_ACTION)
 
 
 def make_nonce(num_bytes: int = 32) -> str:

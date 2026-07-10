@@ -71,11 +71,12 @@
       </div>
       <p class="note">
         🔒 <strong>Intégrité (axe de sécurité, primordial)</strong> — attestation
-        <strong>SPDM iDRAC9</strong> (licence Datacenter, firmware ≥ 6.10 ; couvre les PERC et NIC).
-        Deux signaux : <em>authenticité</em> de l'identité (certificat matériel signé Dell, vérifié
-        par l'iDRAC — un échec = <strong>Compromis</strong>) et <em>mesures firmware</em> comparées,
-        à version égale, à une empreinte connue-bonne (baseline). Sans mesure SPDM ou sans baseline,
-        l'intégrité est <em>Non vérifiable</em>.<br />
+        <strong>iDRAC9</strong> (licence Datacenter, firmware ≥ 6.10). <strong>SPDM</strong> couvre
+        les PERC/NIC (authenticité de l'identité + mesures firmware) ; <strong>TPM/PCR</strong>
+        couvre le BIOS/UEFI (mesures de démarrage PCR0–7). À version égale, l'empreinte mesurée est
+        comparée à une empreinte connue-bonne (baseline) ; un échec d'authenticité ou une mesure
+        différente = <strong>Compromis</strong>. Sans mesure ni baseline, l'intégrité reste
+        <em>Non vérifiable</em>.<br />
         🔄 <strong>Mise à jour (axe informatif)</strong> : une version officielle plus récente au
         catalogue Dell est disponible. C'est un état distinct de l'intégrité — un firmware peut
         être à jour <em>et</em> compromis, ou intègre <em>et</em> à mettre à jour.

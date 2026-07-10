@@ -27,6 +27,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 import spdm
+import tpm
 
 try:  # Neutralise l'avertissement de certificat auto-signé de l'iDRAC.
     import urllib3
@@ -229,12 +230,22 @@ class IdracClient:
                 detail = self._get_json(odata_id)
             except IdracError:
                 continue
+            integrity_type = (detail.get("ComponentIntegrityType", "") or "").upper()
             record = spdm.AttestationRecord(
                 target_name=spdm.target_name(detail),
-                integrity_type=detail.get("ComponentIntegrityType", "") or "",
+                integrity_type=integrity_type,
                 authenticity=spdm.parse_verification_status(detail),
             )
-            if fetch_measurements:
+            if integrity_type == "TPM":
+                # Mesures BIOS/UEFI : digests PCR exposés en GET, sinon action.
+                digest, algo = tpm.extract_pcr_digest(detail)
+                if not digest and fetch_measurements:
+                    action = spdm.action_target(detail, tpm.TPM_SIGNED_MEASUREMENTS_ACTION)
+                    if action:
+                        digest, algo = self._signed_measurement_digest(action, kind="tpm")
+                record.measurement_hash = digest
+                record.hash_algorithm = algo
+            elif fetch_measurements:
                 action_target = spdm.signed_measurements_action_target(detail)
                 if action_target:
                     digest, algo = self._signed_measurement_digest(action_target)
@@ -243,8 +254,13 @@ class IdracClient:
             records.append(record)
         return records
 
-    def _signed_measurement_digest(self, action_target: str) -> tuple[str, str]:
-        """Appelle SPDMGetSignedMeasurements et dérive une empreinte de mesure."""
+    def _signed_measurement_digest(self, action_target: str, kind: str = "spdm") -> tuple[str, str]:
+        """Appelle *GetSignedMeasurements et dérive une empreinte de mesure.
+
+        ``kind`` (``"spdm"`` / ``"tpm"``) est informatif : les deux réponses
+        exposent ``SignedMeasurements`` (base64) que l'on décode en blocs de
+        mesure via le même extracteur, en écartant la signature.
+        """
         payload = {"Nonce": spdm.make_nonce(), "SlotId": 0}
         url = self._base_url() + action_target
         try:
@@ -269,12 +285,22 @@ class IdracClient:
         return digest, algo
 
     def enrich_with_attestation(self, entries: list[FirmwareEntry]) -> None:
-        """Complète l'inventaire avec l'authenticité et le hash mesuré (SPDM)."""
+        """Complète l'inventaire avec l'authenticité et le hash mesuré.
+
+        SPDM → périphériques (PERC/NIC), rapproché par nom de cible.
+        TPM  → BIOS/UEFI (mesures PCR), rattaché à l'entrée BIOS.
+        """
         records = self.get_attestation_records()
         if not records:
             return
+        tpm_records = [r for r in records if r.integrity_type == "TPM"]
+        device_records = [r for r in records if r.integrity_type != "TPM"]
         for entry in entries:
-            record = _match_attestation(entry.name, records)
+            record = None
+            if _is_bios(entry) and tpm_records:
+                record = tpm_records[0]
+            if record is None:
+                record = _match_attestation(entry.name, device_records)
             if record is None:
                 continue
             entry.authenticity = record.authenticity
@@ -355,6 +381,10 @@ class IdracClient:
                 current[key.strip()] = value.strip()
         flush()
         return entries
+
+
+def _is_bios(entry: "FirmwareEntry") -> bool:
+    return (entry.component_type or "").upper() == "BIOS" or "bios" in (entry.name or "").lower()
 
 
 def _match_attestation(name: str, records: list) -> Optional[object]:

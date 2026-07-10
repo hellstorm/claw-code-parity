@@ -21,6 +21,7 @@ utilise ``iterparse`` pour le lire en flux sans tout charger en mémoire.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import os
 import time
@@ -187,6 +188,43 @@ def _parse_component(elem: ET.Element) -> CatalogComponent:
         release_date=release_date,
         supported_device_ids=device_ids,
     )
+
+
+def verify_dup(
+    url: str,
+    expected_md5: str,
+    *,
+    timeout: int = 300,
+    chunk_size: int = 65536,
+    max_bytes: int = 600 * 1024 * 1024,
+) -> tuple[bool, str, int]:
+    """Télécharge un paquet DUP en flux et vérifie son MD5 officiel.
+
+    Sécurise la chaîne de mise à jour : le fichier récupéré correspond-il bien à
+    l'empreinte publiée par Dell au catalogue ? Retourne
+    ``(conforme, md5_calculé, taille_octets)``. N'écrit rien sur disque.
+    """
+    if not expected_md5:
+        raise CatalogError("Aucun hash de référence pour ce paquet.")
+    try:
+        resp = requests.get(url, stream=True, timeout=timeout)
+    except requests.RequestException as exc:
+        raise CatalogError(f"Téléchargement du paquet impossible : {exc}") from exc
+    if resp.status_code >= 400:
+        raise CatalogError(f"Paquet indisponible (HTTP {resp.status_code}).")
+
+    digest = hashlib.md5()
+    total = 0
+    for chunk in resp.iter_content(chunk_size):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            resp.close()
+            raise CatalogError("Paquet trop volumineux (limite de sécurité dépassée).")
+        digest.update(chunk)
+    computed = digest.hexdigest().lower()
+    return computed == expected_md5.strip().lower(), computed, total
 
 
 def load_catalog(
