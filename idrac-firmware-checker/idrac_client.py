@@ -17,7 +17,6 @@ avec le catalogue officiel Dell (voir ``catalog.py``).
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -26,6 +25,8 @@ from typing import Optional
 
 import requests
 from requests.auth import HTTPBasicAuth
+
+import spdm
 
 try:  # Neutralise l'avertissement de certificat auto-signé de l'iDRAC.
     import urllib3
@@ -55,6 +56,7 @@ class FirmwareEntry:
     updateable: bool = False
     measured_hash: str = ""
     hash_algorithm: str = ""
+    authenticity: str = ""  # authentic / failed / unknown (attestation SPDM)
     raw: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -66,6 +68,7 @@ class FirmwareEntry:
             "updateable": self.updateable,
             "measured_hash": self.measured_hash,
             "hash_algorithm": self.hash_algorithm,
+            "authenticity": self.authenticity,
         }
 
 
@@ -200,21 +203,24 @@ class IdracClient:
         )
 
     # ------------------------------------------------------------------ #
-    # Attestation SPDM / ComponentIntegrity (hash du firmware en exécution)
+    # Attestation SPDM iDRAC9 (Redfish ComponentIntegrity)
     # ------------------------------------------------------------------ #
-    def get_measured_hashes(self) -> dict[str, dict]:
-        """Récupère les empreintes mesurées du firmware via SPDM (best-effort).
+    def get_attestation_records(self, *, fetch_measurements: bool = True) -> list[spdm.AttestationRecord]:
+        """Attestation SPDM des périphériques (PERC/NIC) sur iDRAC9.
 
-        Interroge ``/redfish/v1/ComponentIntegrity`` (attestation de périphérique
-        SPDM des iDRAC récents). Retourne un dict ``nom -> {hash, algorithm}``.
-        Silencieux : si l'endpoint est absent ou le format inattendu, retourne
-        ``{}`` (l'intégrité sera alors « non vérifiable »).
+        Interroge ``/redfish/v1/ComponentIntegrity`` : pour chaque périphérique
+        attesté, on lit l'**authenticité** (identité SPDM vérifiée par l'iDRAC)
+        et, si ``fetch_measurements``, on invoque l'action
+        ``SPDMGetSignedMeasurements`` pour dériver une empreinte de mesure.
+
+        Best-effort et silencieux : endpoint absent (licence/firmware/support
+        manquant) → liste vide → intégrité « non vérifiable ».
         """
-        result: dict[str, dict] = {}
+        records: list[spdm.AttestationRecord] = []
         try:
             collection = self._get_json("/redfish/v1/ComponentIntegrity")
         except IdracError:
-            return result
+            return records
         for member in collection.get("Members", []):
             odata_id = member.get("@odata.id")
             if not odata_id:
@@ -223,23 +229,58 @@ class IdracClient:
                 detail = self._get_json(odata_id)
             except IdracError:
                 continue
-            name = _integrity_target_name(detail)
-            hash_value, algo = _extract_measurement_hash(detail)
-            if name and hash_value:
-                result[name] = {"hash": hash_value, "algorithm": algo}
-        return result
+            record = spdm.AttestationRecord(
+                target_name=spdm.target_name(detail),
+                integrity_type=detail.get("ComponentIntegrityType", "") or "",
+                authenticity=spdm.parse_verification_status(detail),
+            )
+            if fetch_measurements:
+                action_target = spdm.signed_measurements_action_target(detail)
+                if action_target:
+                    digest, algo = self._signed_measurement_digest(action_target)
+                    record.measurement_hash = digest
+                    record.hash_algorithm = algo
+            records.append(record)
+        return records
 
-    def enrich_with_measured_hashes(self, entries: list[FirmwareEntry]) -> None:
-        """Complète les entrées d'inventaire avec les hash mesurés (SPDM)."""
-        measured = self.get_measured_hashes()
-        if not measured:
+    def _signed_measurement_digest(self, action_target: str) -> tuple[str, str]:
+        """Appelle SPDMGetSignedMeasurements et dérive une empreinte de mesure."""
+        payload = {"Nonce": spdm.make_nonce(), "SlotId": 0}
+        url = self._base_url() + action_target
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                auth=HTTPBasicAuth(self.username, self.password),
+                verify=self.verify_ssl,
+                timeout=self.timeout,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+        except requests.RequestException:
+            return "", ""
+        if resp.status_code >= 400:
+            return "", ""
+        try:
+            data = resp.json()
+        except ValueError:
+            return "", ""
+        algo = data.get("HashingAlgorithm", "") or ""
+        digest = spdm.extract_measurement_digest(data.get("SignedMeasurements", "") or "", algo)
+        return digest, algo
+
+    def enrich_with_attestation(self, entries: list[FirmwareEntry]) -> None:
+        """Complète l'inventaire avec l'authenticité et le hash mesuré (SPDM)."""
+        records = self.get_attestation_records()
+        if not records:
             return
-        # Rapprochement simple par sous-chaîne de nom.
         for entry in entries:
-            match = _match_measured(entry.name, measured)
-            if match:
-                entry.measured_hash = match["hash"]
-                entry.hash_algorithm = match.get("algorithm", "")
+            record = _match_attestation(entry.name, records)
+            if record is None:
+                continue
+            entry.authenticity = record.authenticity
+            if record.measurement_hash:
+                entry.measured_hash = record.measurement_hash
+                entry.hash_algorithm = record.hash_algorithm
 
     # ------------------------------------------------------------------ #
     # Transport racadm (repli)
@@ -316,61 +357,14 @@ class IdracClient:
         return entries
 
 
-_HEX_RE = re.compile(r"^[0-9a-fA-F]{16,}$")
-
-
-def _integrity_target_name(detail: dict) -> str:
-    """Déduit le nom du composant cible d'une ressource ComponentIntegrity."""
-    uri = detail.get("TargetComponentURI") or ""
-    if isinstance(uri, dict):
-        uri = uri.get("@odata.id", "")
-    if uri:
-        return str(uri).rstrip("/").rsplit("/", 1)[-1]
-    return str(detail.get("Id") or detail.get("Name") or "")
-
-
-def _extract_measurement_hash(detail: dict) -> tuple[str, str]:
-    """Cherche, de façon tolérante, une empreinte de mesure dans la ressource.
-
-    Les schémas SPDM varient selon les versions d'iDRAC ; on parcourt donc la
-    structure à la recherche d'une clé contenant « hash »/« measurement » dont
-    la valeur ressemble à une empreinte hexadécimale, en notant l'algorithme
-    voisin s'il est présent.
-    """
-    algo = ""
-
-    def walk(node) -> str:
-        nonlocal algo
-        if isinstance(node, dict):
-            for key, value in node.items():
-                lower = key.lower()
-                if "hashingalgorithm" in lower or lower in ("measurementhashalgorithm", "algorithm"):
-                    if isinstance(value, str) and value:
-                        algo = value
-                if isinstance(value, str) and ("hash" in lower or "measurement" in lower):
-                    if _HEX_RE.match(value.strip()):
-                        return value.strip()
-                found = walk(value)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for item in node:
-                found = walk(item)
-                if found:
-                    return found
-        return ""
-
-    return walk(detail), algo
-
-
-def _match_measured(name: str, measured: dict[str, dict]) -> Optional[dict]:
-    if name in measured:
-        return measured[name]
+def _match_attestation(name: str, records: list) -> Optional[object]:
+    """Rapproche une entrée d'inventaire d'un enregistrement d'attestation
+    (rapprochement par sous-chaîne de nom de cible)."""
     low = name.lower()
-    for key, value in measured.items():
-        kl = key.lower()
-        if kl and (kl in low or low in kl):
-            return value
+    for record in records:
+        target = (record.target_name or "").lower()
+        if target and (target in low or low in target):
+            return record
     return None
 
 

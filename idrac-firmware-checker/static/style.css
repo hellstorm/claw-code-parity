@@ -226,6 +226,18 @@ th.col-integrity { color: var(--text); }
 .row-alert:hover { background: rgba(239, 68, 68, 0.18) !important; }
 .row-alert td:first-child { font-weight: 600; }
 
+.auth {
+  display: inline-block;
+  margin-top: .3rem;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .01em;
+  cursor: help;
+}
+.auth-ok { color: var(--ok); }
+.auth-bad { color: var(--bad); }
+.auth-na { color: var(--muted); }
+
 .update-btn {
   background: var(--bad);
   padding: .4rem .8rem;

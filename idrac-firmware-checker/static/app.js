@@ -62,20 +62,38 @@ function integrityClass(status) {
   return "unknown";
 }
 
+function authSubIndicator(row) {
+  // Authenticité de l'identité SPDM (certificat matériel signé Dell).
+  if (row.authenticity === "authentic") {
+    return `<span class="auth auth-ok" title="Identité SPDM authentifiée par l'iDRAC.">✔ identité</span>`;
+  }
+  if (row.authenticity === "failed") {
+    return `<span class="auth auth-bad" title="Échec d'authentification du certificat matériel : périphérique non authentique.">✖ identité</span>`;
+  }
+  return `<span class="auth auth-na" title="Périphérique non attesté (SPDM non supporté, non couvert, ou licence Datacenter absente).">◦ non attesté</span>`;
+}
+
 function integrityBadge(row) {
   const cls = integrityClass(row.integrity);
   let title = "";
   if (row.integrity === "compromised") {
-    title =
-      "Même version, hash différent de la référence.\n" +
-      "mesuré : " + (row.measured_hash || "—") + "\n" +
-      "attendu : " + (row.expected_hash || "—");
+    if (row.authenticity === "failed") {
+      title = "Échec d'authentification de l'identité SPDM (certificat matériel).";
+    } else {
+      title =
+        "Même version, mesure différente de la référence.\n" +
+        "mesuré : " + (row.measured_hash || "—") + "\n" +
+        "attendu : " + (row.expected_hash || "—");
+    }
   } else if (row.integrity === "ok") {
-    title = "Hash conforme à la baseline (" + (row.hash_algorithm || "hash") + ").";
+    title = "Mesure SPDM conforme à la baseline (" + (row.hash_algorithm || "hash") + ").";
   } else {
-    title = "Pas de hash mesuré et/ou pas d'empreinte de référence à version égale.";
+    title = "Pas de mesure SPDM et/ou pas d'empreinte de référence à version égale.";
   }
-  return `<span class="badge ${cls}" title="${escapeHtml(title)}">${escapeHtml(row.integrity_label)}</span>`;
+  return (
+    `<span class="badge ${cls}" title="${escapeHtml(title)}">${escapeHtml(row.integrity_label)}</span>` +
+    `<br />${authSubIndicator(row)}`
+  );
 }
 
 function updateCell(row) {

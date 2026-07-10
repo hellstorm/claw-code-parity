@@ -21,13 +21,9 @@ from compare import (  # noqa: E402
     compute_integrity,
     compute_update,
 )
-from idrac_client import (  # noqa: E402
-    FirmwareEntry,
-    IdracClient,
-    _extract_measurement_hash,
-    _integrity_target_name,
-)
+from idrac_client import FirmwareEntry, IdracClient, _match_attestation  # noqa: E402
 from matching import version_ge, version_key, versions_equal  # noqa: E402
+import spdm  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 SAMPLE = os.path.join(ROOT, "sample_catalog.xml")
@@ -103,6 +99,18 @@ def test_integrity_unverifiable_without_reference():
     assert compute_integrity("abc123abc123abc1", None) == INTEGRITY_UNVERIFIABLE
 
 
+def test_integrity_compromised_when_authenticity_failed(baseline):
+    # Échec d'authentification de l'identité SPDM -> compromis, quelles que
+    # soient les mesures.
+    ref = baseline.reference_for("BIOS", "2.10.0")
+    assert compute_integrity(ref.hash, ref, authenticity="failed") == INTEGRITY_COMPROMISED
+
+
+def test_integrity_ok_when_authentic_and_hash_matches(baseline):
+    ref = baseline.reference_for("BIOS", "2.10.0")
+    assert compute_integrity(ref.hash, ref, authenticity="authentic") == INTEGRITY_OK
+
+
 def test_baseline_requires_equal_version(baseline):
     # Même firmware mais version différente -> pas de référence (fichier différent).
     assert baseline.reference_for("BIOS", "2.99.0") is None
@@ -141,26 +149,73 @@ def test_compare_inventory_two_axes(catalog, baseline):
     assert d["update_label"] == "À jour"
 
 
-# --- Attestation SPDM (parsing best-effort) --------------------------------
-def test_extract_measurement_hash_deep_search():
+# --- Attestation SPDM iDRAC9 ------------------------------------------------
+def test_parse_verification_status_success():
     detail = {
-        "TargetComponentURI": {"@odata.id": "/redfish/v1/Systems/System.Embedded.1"},
         "SPDM": {
-            "IdentityAuthentication": {"ResponderAuthentication": {}},
-            "Measurement": {
-                "MeasurementHashingAlgorithm": "TPM_ALG_SHA_256",
-                "MeasurementDataHash": "a1c2e3f405162738495a6b7c8d9e0f11",
-            },
-        },
+            "IdentityAuthentication": {
+                "ResponderAuthentication": {"VerificationStatus": "Success"}
+            }
+        }
     }
-    h, algo = _extract_measurement_hash(detail)
-    assert h == "a1c2e3f405162738495a6b7c8d9e0f11"
-    assert "SHA_256" in algo
+    assert spdm.parse_verification_status(detail) == spdm.AUTH_AUTHENTIC
 
 
-def test_integrity_target_name_from_uri():
-    detail = {"TargetComponentURI": "/redfish/v1/Chassis/System.Embedded.1"}
-    assert _integrity_target_name(detail) == "System.Embedded.1"
+def test_parse_verification_status_failed():
+    detail = {"SPDM": {"IdentityAuthentication": {"VerificationStatus": "Failed"}}}
+    assert spdm.parse_verification_status(detail) == spdm.AUTH_FAILED
+
+
+def test_parse_verification_status_unknown_when_absent():
+    assert spdm.parse_verification_status({"SPDM": {}}) == spdm.AUTH_UNKNOWN
+
+
+def test_target_name_from_component_uri():
+    detail = {"TargetComponentURI": {"@odata.id": "/redfish/v1/Chassis/RAID.Slot.1-1"}}
+    assert spdm.target_name(detail) == "RAID.Slot.1-1"
+
+
+def test_signed_measurements_action_target():
+    detail = {
+        "Actions": {
+            "#ComponentIntegrity.SPDMGetSignedMeasurements": {
+                "target": "/redfish/v1/ComponentIntegrity/1/Actions/"
+                "ComponentIntegrity.SPDMGetSignedMeasurements"
+            }
+        }
+    }
+    assert spdm.signed_measurements_action_target(detail).endswith("SPDMGetSignedMeasurements")
+
+
+def test_extract_measurement_digest_is_stable_ignoring_signature():
+    import base64
+    import struct
+
+    # Deux blocs de mesure DSP0274 : [index(1)|spec(1)|size(2 LE)|value].
+    def block(index, value):
+        return bytes([index, 0x01]) + struct.pack("<H", len(value)) + value
+
+    blocks = block(1, b"\xaa" * 48) + block(2, b"\xbb" * 48)
+    # Deux « signatures » différentes concaténées après les blocs.
+    sig_a = b"\x00" * 4 + b"signatureA-variable-part"
+    sig_b = b"\x00" * 4 + b"signatureB-totally-other"
+    digest_a = spdm.extract_measurement_digest(base64.b64encode(blocks + sig_a).decode())
+    digest_b = spdm.extract_measurement_digest(base64.b64encode(blocks + sig_b).decode())
+    assert digest_a and digest_a == digest_b  # stable malgré la signature variable
+
+    # Une mesure altérée change l'empreinte.
+    tampered = block(1, b"\xaa" * 48) + block(2, b"\xcc" * 48)
+    assert spdm.extract_measurement_digest(base64.b64encode(tampered + sig_a).decode()) != digest_a
+
+
+def test_extract_measurement_digest_empty_on_garbage():
+    assert spdm.extract_measurement_digest("not base64 %%%") == ""
+
+
+def test_match_attestation_by_substring():
+    records = [spdm.AttestationRecord(target_name="RAID.Slot.1-1", authenticity="authentic")]
+    m = _match_attestation("Dell PERC H755 RAID.Slot.1-1 Controller", records)
+    assert m is not None and m.authenticity == "authentic"
 
 
 # --- racadm -----------------------------------------------------------------

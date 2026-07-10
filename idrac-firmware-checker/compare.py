@@ -53,6 +53,14 @@ UPDATE_LABELS = {
     UPDATE_UNKNOWN: "Inconnu",
 }
 
+# --- Authenticité (identité SPDM) -------------------------------------------
+AUTH_LABELS = {
+    "authentic": "Authentique",
+    "failed": "Échec d'authentification",
+    "unknown": "Non attesté",
+    "": "Non attesté",
+}
+
 
 @dataclass
 class ComparisonRow:
@@ -65,6 +73,7 @@ class ComparisonRow:
     measured_hash: str
     expected_hash: str
     hash_algorithm: str
+    authenticity: str
     # Axe mise à jour
     update: str
     package_hash: str
@@ -72,6 +81,7 @@ class ComparisonRow:
     matched: bool
 
     def to_dict(self) -> dict:
+        auth = self.authenticity or "unknown"
         return {
             "name": self.name,
             "component_type": self.component_type,
@@ -82,6 +92,8 @@ class ComparisonRow:
             "measured_hash": self.measured_hash,
             "expected_hash": self.expected_hash,
             "hash_algorithm": self.hash_algorithm,
+            "authenticity": auth,
+            "authenticity_label": AUTH_LABELS.get(auth, "Non attesté"),
             "update": self.update,
             "update_label": UPDATE_LABELS[self.update],
             "package_hash": self.package_hash,
@@ -119,13 +131,26 @@ class CatalogIndex:
         return max(candidates, key=lambda c: version_key(c.version))
 
 
-def compute_integrity(measured_hash: str, reference: Optional[BaselineEntry]) -> str:
-    """Statut d'intégrité. ``reference`` est déjà apparié à version égale."""
-    if not measured_hash or reference is None or not reference.hash:
-        return INTEGRITY_UNVERIFIABLE
-    if normalize_hash(measured_hash) == reference.normalized_hash:
-        return INTEGRITY_OK
-    return INTEGRITY_COMPROMISED
+def compute_integrity(
+    measured_hash: str,
+    reference: Optional[BaselineEntry],
+    authenticity: str = "",
+) -> str:
+    """Statut d'intégrité (axe sécurité) combinant deux signaux SPDM iDRAC9.
+
+    ``reference`` est déjà apparié à version égale. L'authenticité (identité
+    SPDM vérifiée par l'iDRAC) prime : un échec d'authentification du certificat
+    matériel signe une compromission, indépendamment des mesures.
+    """
+    # 1) Authenticité de l'identité (certificat matériel signé Dell).
+    if authenticity == "failed":
+        return INTEGRITY_COMPROMISED
+    # 2) Mesures firmware vs baseline connue-bonne (à version égale).
+    if measured_hash and reference and reference.hash:
+        if normalize_hash(measured_hash) == reference.normalized_hash:
+            return INTEGRITY_OK
+        return INTEGRITY_COMPROMISED
+    return INTEGRITY_UNVERIFIABLE
 
 
 def compute_update(installed_version: str, official: Optional[CatalogComponent]) -> str:
@@ -147,8 +172,9 @@ def build_row(
     hash_algorithm: str,
     official: Optional[CatalogComponent],
     reference: Optional[BaselineEntry],
+    authenticity: str = "",
 ) -> ComparisonRow:
-    integrity = compute_integrity(measured_hash, reference)
+    integrity = compute_integrity(measured_hash, reference, authenticity)
     update = compute_update(installed_version, official)
     return ComparisonRow(
         name=name,
@@ -159,6 +185,7 @@ def build_row(
         measured_hash=measured_hash,
         expected_hash=reference.hash if reference else "",
         hash_algorithm=hash_algorithm or (reference.algorithm if reference else ""),
+        authenticity=authenticity or "unknown",
         update=update,
         package_hash=official.hash_md5 if official else "",
         download_url=official.download_url if update == UPDATE_AVAILABLE else "",
@@ -181,6 +208,7 @@ def compare_inventory(
         installed_version = getattr(entry, "version", "") or ""
         measured_hash = getattr(entry, "measured_hash", "") or ""
         hash_algorithm = getattr(entry, "hash_algorithm", "") or ""
+        authenticity = getattr(entry, "authenticity", "") or ""
         official = index.latest_for(name, comp_type)
         reference = base.reference_for(name, installed_version)
         rows.append(
@@ -192,6 +220,7 @@ def compare_inventory(
                 hash_algorithm,
                 official,
                 reference,
+                authenticity,
             )
         )
     return rows

@@ -70,10 +70,12 @@
         </table>
       </div>
       <p class="note">
-        🔒 <strong>Intégrité (axe de sécurité, primordial)</strong> : à <em>version égale</em>,
-        le hash mesuré du firmware installé (attestation SPDM) est comparé à l'empreinte
-        connue-bonne de la baseline. Un hash différent = <strong>Compromis</strong>. Sans hash
-        mesuré ou sans baseline, l'intégrité est <em>Non vérifiable</em>.<br />
+        🔒 <strong>Intégrité (axe de sécurité, primordial)</strong> — attestation
+        <strong>SPDM iDRAC9</strong> (licence Datacenter, firmware ≥ 6.10 ; couvre les PERC et NIC).
+        Deux signaux : <em>authenticité</em> de l'identité (certificat matériel signé Dell, vérifié
+        par l'iDRAC — un échec = <strong>Compromis</strong>) et <em>mesures firmware</em> comparées,
+        à version égale, à une empreinte connue-bonne (baseline). Sans mesure SPDM ou sans baseline,
+        l'intégrité est <em>Non vérifiable</em>.<br />
         🔄 <strong>Mise à jour (axe informatif)</strong> : une version officielle plus récente au
         catalogue Dell est disponible. C'est un état distinct de l'intégrité — un firmware peut
         être à jour <em>et</em> compromis, ou intègre <em>et</em> à mettre à jour.

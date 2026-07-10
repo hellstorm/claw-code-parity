@@ -13,17 +13,30 @@ c'est le cœur de sa valeur :
 
 ### 1. Intégrité (hash) — axe de sécurité, **primordial**
 
-À **version égale** (même « nom de fichier »), le hash *mesuré* du firmware
-installé est comparé à l'empreinte **connue-bonne** de la baseline :
+S'appuie sur l'**attestation SPDM d'iDRAC9** (licence **Datacenter**, firmware
+**≥ 6.10** ; couvre les **contrôleurs PERC** et **cartes réseau NIC**). Deux
+signaux distincts sont combinés :
+
+- **Authenticité de l'identité** — l'iDRAC vérifie le certificat matériel signé
+  Dell du périphérique (détection d'une contrefaçon / d'une altération dans la
+  chaîne d'approvisionnement). Un **échec = Compromis**, quelles que soient les
+  mesures.
+- **Mesures firmware** — à **version égale**, l'empreinte de mesure SPDM est
+  comparée à l'empreinte **connue-bonne** de la baseline.
 
 | État | Signification | Couleur |
 |------|---------------|---------|
-| **Intègre** | hash mesuré == référence | 🟢 vert |
-| **Compromis** | même version mais hash différent → binaire altéré | 🔴 rouge |
-| **Non vérifiable** | pas de hash mesuré et/ou pas de baseline à version égale | ⚪ gris |
+| **Intègre** | identité non invalidée **et** mesure == référence | 🟢 vert |
+| **Compromis** | échec d'authenticité **ou** même version mais mesure différente | 🔴 rouge |
+| **Non vérifiable** | pas de mesure SPDM et/ou pas de baseline à version égale | ⚪ gris |
 
-Un firmware **à jour peut être compromis** (même version, binaire modifié) :
-c'est le cas le plus grave, et il est signalé indépendamment de la version.
+Sous le badge, un sous-indicateur montre l'authenticité de l'identité :
+✔ *identité* / ✖ *identité* / ◦ *non attesté*.
+
+Un firmware **à jour peut être compromis** (identité falsifiée, ou même version
+mais mesure modifiée) : c'est le cas le plus grave, signalé indépendamment de la
+version. Le BIOS et l'iDRAC eux-mêmes ne sont pas couverts par SPDM → *non
+vérifiable* sur cet axe (comportement honnête, pas de faux « intègre »).
 
 ### 2. Mise à jour (version) — axe informatif
 
@@ -40,8 +53,8 @@ couleur de ligne suit l'axe **intégrité** (sécurité), prioritaire.
 
 - Saisie IP / identifiant / mot de passe de l'iDRAC.
 - Récupération des firmwares installés via **Redfish** (API HTTP) ou **racadm** (CLI).
-- Récupération des **hash mesurés** du firmware en exécution via **attestation SPDM**
-  (`/redfish/v1/ComponentIntegrity`) quand la plateforme le supporte (best-effort).
+- **Attestation SPDM iDRAC9** via `/redfish/v1/ComponentIntegrity` : authenticité de
+  l'identité (GET) + mesures firmware via l'action `SPDMGetSignedMeasurements` (POST + nonce).
 - Comparaison d'intégrité contre une **baseline** d'empreintes connues-bonnes.
 - Téléchargement + cache du catalogue Dell (`Catalog.xml.gz`), lu en flux (`iterparse`).
 - Tableau comparatif à **deux axes** diffusé **ligne par ligne** (flux NDJSON).
@@ -75,30 +88,45 @@ IDRAC_BASELINE="$PWD/sample_baseline.json" \
 python app.py
 ```
 
-## D'où viennent les hash
+## D'où viennent les empreintes (iDRAC9 SPDM)
 
 Il faut distinguer trois empreintes, souvent confondues :
 
 | Empreinte | Source | Rôle |
 |-----------|--------|------|
-| **Hash mesuré** du firmware en exécution | Attestation **SPDM** de l'iDRAC (`ComponentIntegrity`) | ce qui tourne réellement |
-| **Hash de référence** connu-bon | **Baseline** (`sample_baseline.json`) capturée sur un hôte de confiance | l'attendu à version égale |
+| **Mesure SPDM** du firmware en exécution | Action `SPDMGetSignedMeasurements` sur `ComponentIntegrity` | ce qui tourne réellement (PERC/NIC) |
+| **Empreinte de référence** connue-bonne | **Baseline** (`sample_baseline.json`) capturée sur un hôte de confiance | l'attendu à version égale |
 | `hashMD5` du **paquet** DUP | `Catalog.xml` de Dell | vérifie un *téléchargement*, **pas** l'exécution |
 
-La vérification d'intégrité compare le **hash mesuré** au **hash de référence**
-de la baseline, **à version identique**. Le `hashMD5` du catalogue ne sert
-**pas** à cette comparaison (c'est le hash d'un fichier d'installation, pas du
-firmware en place) ; il est seulement rattaché au bouton de téléchargement pour
-vérifier le paquet récupéré.
+La vérification d'intégrité compare la **mesure SPDM** à l'**empreinte de
+référence** de la baseline, **à version identique** — plus le signal
+d'**authenticité** de l'identité (GET). Le `hashMD5` du catalogue ne sert **pas**
+à cette comparaison (c'est le hash d'un fichier d'installation, pas du firmware
+en place) ; il est seulement rattaché au bouton de téléchargement.
 
-Si l'iDRAC n'expose pas d'attestation SPDM, ou si aucune baseline n'est fournie
-pour la version installée, l'intégrité est honnêtement affichée comme **Non
-vérifiable** plutôt que faussement « intègre ».
+Si l'iDRAC n'expose pas d'attestation SPDM (licence/firmware/périphérique non
+couvert), ou si aucune baseline n'est fournie pour la version installée,
+l'intégrité est honnêtement affichée comme **Non vérifiable** plutôt que
+faussement « intègre ».
+
+### Comment la mesure est dérivée
+
+`SPDMGetSignedMeasurements` renvoie `SignedMeasurements` (base64) = les blocs de
+mesure **+ une signature** dépendant du nonce (donc variable à chaque appel).
+`spdm.py` extrait les **blocs de mesure** (format DMTF DSP0274,
+`[Index|Spec|Size|Value]`), écarte la signature, et en dérive une empreinte
+SHA-256 stable.
+
+> ⚠️ Le décodage binaire DSP0274 suit la spécification mais n'a pas été validé
+> contre une unité iDRAC9 réelle. Il est **tolérant** et surtout
+> **auto-cohérent** : la baseline étant capturée avec le *même* extracteur,
+> toute divergence de mesure est détectée même si le décodage absolu diffère.
+> Un échantillon réel de réponse permet de figer le parseur exactement.
 
 ### Établir une baseline
 
-Capturez les empreintes SPDM d'un hôte de confiance (fraîchement flashé depuis
-les paquets Dell officiels) et enregistrez-les au format de `sample_baseline.json` :
+Capturez les mesures SPDM d'un hôte de confiance (fraîchement flashé depuis les
+paquets Dell officiels) et enregistrez-les au format de `sample_baseline.json` :
 liste d'objets `{name, version, hash, algorithm}`. Réutilisez ensuite ce fichier
 pour détecter toute divergence sur les autres hôtes ou dans le temps.
 
@@ -107,7 +135,8 @@ pour détecter toute divergence sur les autres hôtes ou dans le temps.
 | Fichier            | Rôle                                                             |
 |--------------------|------------------------------------------------------------------|
 | `app.py`           | Serveur Flask, endpoint `/api/scan` (flux NDJSON temps réel).    |
-| `idrac_client.py`  | Connexion iDRAC (Redfish + repli racadm), inventaire firmware, hash SPDM.|
+| `idrac_client.py`  | Connexion iDRAC (Redfish + repli racadm), inventaire, appels d'attestation.|
+| `spdm.py`          | Attestation SPDM iDRAC9 : authenticité + extraction des mesures (DSP0274).|
 | `catalog.py`       | Téléchargement, décompression, parsing en flux du catalogue Dell.|
 | `baseline.py`      | Chargement/interrogation de la baseline d'empreintes connues-bonnes.|
 | `compare.py`       | Calcul des **deux axes** (intégrité hash + mise à jour version).  |

@@ -77,20 +77,24 @@ def scan() -> Response:
             {"type": "status", "step": "inventory", "message": f"{len(installed)} firmware(s) installé(s) détecté(s)."}
         )
 
-        # Empreintes mesurées du firmware en exécution (attestation SPDM).
+        # Attestation SPDM iDRAC9 (authenticité + mesures firmware).
         yield _sse_free_line(
-            {"type": "status", "step": "attest", "message": "Récupération des empreintes mesurées (SPDM)…"}
+            {"type": "status", "step": "attest", "message": "Attestation SPDM des périphériques (iDRAC9)…"}
         )
         try:
-            client.enrich_with_measured_hashes(installed)
+            client.enrich_with_attestation(installed)
         except Exception:  # best-effort : ne bloque jamais l'analyse
             pass
+        n_attested = sum(1 for e in installed if e.authenticity in ("authentic", "failed"))
         n_measured = sum(1 for e in installed if e.measured_hash)
         yield _sse_free_line(
             {
                 "type": "status",
                 "step": "attest_ok",
-                "message": f"{n_measured}/{len(installed)} firmware(s) avec empreinte mesurée.",
+                "message": (
+                    f"{n_attested} périphérique(s) attesté(s), "
+                    f"{n_measured} avec empreinte mesurée."
+                ),
             }
         )
 
@@ -140,6 +144,7 @@ def scan() -> Response:
                 entry.hash_algorithm,
                 official,
                 reference,
+                entry.authenticity,
             )
             yield _sse_free_line({"type": "row", "row": row.to_dict()})
 
