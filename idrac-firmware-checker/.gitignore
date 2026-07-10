@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-.cache/
-.venv/
-venv/
-.pytest_cache/
-scratch_*.py
-preview_*.png
