@@ -23,9 +23,9 @@ from typing import Iterator
 
 from flask import Flask, Response, render_template, request, stream_with_context
 
+from baseline import load_baseline
 from catalog import CatalogError, load_catalog
-from compare import build_row
-from compare import CatalogIndex
+from compare import CatalogIndex, build_row
 from idrac_client import IdracClient, IdracError
 
 app = Flask(__name__)
@@ -36,6 +36,9 @@ CATALOG_CACHE = os.path.join(CACHE_DIR, "Catalog.xml")
 # Catalogue local optionnel (utile hors-ligne / démo).
 LOCAL_CATALOG = os.environ.get("IDRAC_LOCAL_CATALOG")
 CATALOG_URL = os.environ.get("IDRAC_CATALOG_URL", "https://downloads.dell.com/catalog/Catalog.xml.gz")
+# Baseline d'empreintes connues-bonnes (référence d'intégrité). Optionnel :
+# sans elle, l'intégrité reste « non vérifiable ».
+BASELINE_PATH = os.environ.get("IDRAC_BASELINE")
 
 
 def _sse_free_line(obj: dict) -> str:
@@ -74,6 +77,23 @@ def scan() -> Response:
             {"type": "status", "step": "inventory", "message": f"{len(installed)} firmware(s) installé(s) détecté(s)."}
         )
 
+        # Empreintes mesurées du firmware en exécution (attestation SPDM).
+        yield _sse_free_line(
+            {"type": "status", "step": "attest", "message": "Récupération des empreintes mesurées (SPDM)…"}
+        )
+        try:
+            client.enrich_with_measured_hashes(installed)
+        except Exception:  # best-effort : ne bloque jamais l'analyse
+            pass
+        n_measured = sum(1 for e in installed if e.measured_hash)
+        yield _sse_free_line(
+            {
+                "type": "status",
+                "step": "attest_ok",
+                "message": f"{n_measured}/{len(installed)} firmware(s) avec empreinte mesurée.",
+            }
+        )
+
         # 2) Catalogue officiel Dell.
         yield _sse_free_line(
             {"type": "status", "step": "catalog", "message": "Téléchargement du catalogue Dell…"}
@@ -91,12 +111,36 @@ def scan() -> Response:
             {"type": "status", "step": "catalog_ok", "message": f"Catalogue chargé ({len(catalog)} paquets)."}
         )
 
-        # 3) Comparaison, diffusée ligne par ligne (temps réel).
+        # 3) Baseline de référence (empreintes connues-bonnes).
+        baseline = load_baseline(BASELINE_PATH)
+        if len(baseline) == 0:
+            yield _sse_free_line(
+                {
+                    "type": "status",
+                    "step": "baseline",
+                    "message": "Aucune baseline d'intégrité : l'intégrité sera « non vérifiable ».",
+                }
+            )
+        else:
+            yield _sse_free_line(
+                {"type": "status", "step": "baseline", "message": f"Baseline chargée ({len(baseline)} empreintes)."}
+            )
+
+        # 4) Comparaison sur deux axes, diffusée ligne par ligne (temps réel).
         index = CatalogIndex(catalog)
         yield _sse_free_line({"type": "status", "step": "compare", "message": "Comparaison en cours…"})
         for entry in installed:
             official = index.latest_for(entry.name, entry.component_type)
-            row = build_row(entry.name, entry.component_type, entry.version, official)
+            reference = baseline.reference_for(entry.name, entry.version)
+            row = build_row(
+                entry.name,
+                entry.component_type,
+                entry.version,
+                entry.measured_hash,
+                entry.hash_algorithm,
+                official,
+                reference,
+            )
             yield _sse_free_line({"type": "row", "row": row.to_dict()})
 
         yield _sse_free_line({"type": "done", "message": "Analyse terminée."})

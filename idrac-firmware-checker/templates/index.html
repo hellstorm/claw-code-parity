@@ -60,9 +60,9 @@
               <th>Firmware</th>
               <th>Type</th>
               <th>Version installée</th>
+              <th class="col-integrity">Intégrité (sécurité)</th>
               <th>Version officielle</th>
-              <th>Hash de référence (paquet)</th>
-              <th>État</th>
+              <th>Mise à jour</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -70,9 +70,13 @@
         </table>
       </div>
       <p class="note">
-        ⚠️ Le hash affiché est le MD5 du <strong>paquet de mise à jour officiel</strong> Dell
-        (référence de téléchargement). L'iDRAC n'expose pas de hash du firmware en cours
-        d'exécution ; l'état d'intégrité repose donc sur la comparaison de version.
+        🔒 <strong>Intégrité (axe de sécurité, primordial)</strong> : à <em>version égale</em>,
+        le hash mesuré du firmware installé (attestation SPDM) est comparé à l'empreinte
+        connue-bonne de la baseline. Un hash différent = <strong>Compromis</strong>. Sans hash
+        mesuré ou sans baseline, l'intégrité est <em>Non vérifiable</em>.<br />
+        🔄 <strong>Mise à jour (axe informatif)</strong> : une version officielle plus récente au
+        catalogue Dell est disponible. C'est un état distinct de l'intégrité — un firmware peut
+        être à jour <em>et</em> compromis, ou intègre <em>et</em> à mettre à jour.
       </p>
     </section>
   </main>

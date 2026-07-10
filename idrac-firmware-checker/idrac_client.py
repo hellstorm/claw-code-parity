@@ -17,6 +17,7 @@ avec le catalogue officiel Dell (voir ``catalog.py``).
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -40,13 +41,20 @@ class IdracError(RuntimeError):
 
 @dataclass
 class FirmwareEntry:
-    """Un firmware installé remonté par l'iDRAC."""
+    """Un firmware installé remonté par l'iDRAC.
+
+    ``measured_hash`` est l'empreinte du firmware *en cours d'exécution*,
+    obtenue par attestation SPDM (``ComponentIntegrity``) quand la plateforme
+    le supporte. Vide sinon → l'intégrité sera « non vérifiable ».
+    """
 
     name: str
     version: str
     component_type: str = ""
     software_id: str = ""
     updateable: bool = False
+    measured_hash: str = ""
+    hash_algorithm: str = ""
     raw: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -56,6 +64,8 @@ class FirmwareEntry:
             "component_type": self.component_type,
             "software_id": self.software_id,
             "updateable": self.updateable,
+            "measured_hash": self.measured_hash,
+            "hash_algorithm": self.hash_algorithm,
         }
 
 
@@ -190,6 +200,48 @@ class IdracClient:
         )
 
     # ------------------------------------------------------------------ #
+    # Attestation SPDM / ComponentIntegrity (hash du firmware en exécution)
+    # ------------------------------------------------------------------ #
+    def get_measured_hashes(self) -> dict[str, dict]:
+        """Récupère les empreintes mesurées du firmware via SPDM (best-effort).
+
+        Interroge ``/redfish/v1/ComponentIntegrity`` (attestation de périphérique
+        SPDM des iDRAC récents). Retourne un dict ``nom -> {hash, algorithm}``.
+        Silencieux : si l'endpoint est absent ou le format inattendu, retourne
+        ``{}`` (l'intégrité sera alors « non vérifiable »).
+        """
+        result: dict[str, dict] = {}
+        try:
+            collection = self._get_json("/redfish/v1/ComponentIntegrity")
+        except IdracError:
+            return result
+        for member in collection.get("Members", []):
+            odata_id = member.get("@odata.id")
+            if not odata_id:
+                continue
+            try:
+                detail = self._get_json(odata_id)
+            except IdracError:
+                continue
+            name = _integrity_target_name(detail)
+            hash_value, algo = _extract_measurement_hash(detail)
+            if name and hash_value:
+                result[name] = {"hash": hash_value, "algorithm": algo}
+        return result
+
+    def enrich_with_measured_hashes(self, entries: list[FirmwareEntry]) -> None:
+        """Complète les entrées d'inventaire avec les hash mesurés (SPDM)."""
+        measured = self.get_measured_hashes()
+        if not measured:
+            return
+        # Rapprochement simple par sous-chaîne de nom.
+        for entry in entries:
+            match = _match_measured(entry.name, measured)
+            if match:
+                entry.measured_hash = match["hash"]
+                entry.hash_algorithm = match.get("algorithm", "")
+
+    # ------------------------------------------------------------------ #
     # Transport racadm (repli)
     # ------------------------------------------------------------------ #
     def _inventory_racadm(self) -> list[FirmwareEntry]:
@@ -262,6 +314,64 @@ class IdracClient:
                 current[key.strip()] = value.strip()
         flush()
         return entries
+
+
+_HEX_RE = re.compile(r"^[0-9a-fA-F]{16,}$")
+
+
+def _integrity_target_name(detail: dict) -> str:
+    """Déduit le nom du composant cible d'une ressource ComponentIntegrity."""
+    uri = detail.get("TargetComponentURI") or ""
+    if isinstance(uri, dict):
+        uri = uri.get("@odata.id", "")
+    if uri:
+        return str(uri).rstrip("/").rsplit("/", 1)[-1]
+    return str(detail.get("Id") or detail.get("Name") or "")
+
+
+def _extract_measurement_hash(detail: dict) -> tuple[str, str]:
+    """Cherche, de façon tolérante, une empreinte de mesure dans la ressource.
+
+    Les schémas SPDM varient selon les versions d'iDRAC ; on parcourt donc la
+    structure à la recherche d'une clé contenant « hash »/« measurement » dont
+    la valeur ressemble à une empreinte hexadécimale, en notant l'algorithme
+    voisin s'il est présent.
+    """
+    algo = ""
+
+    def walk(node) -> str:
+        nonlocal algo
+        if isinstance(node, dict):
+            for key, value in node.items():
+                lower = key.lower()
+                if "hashingalgorithm" in lower or lower in ("measurementhashalgorithm", "algorithm"):
+                    if isinstance(value, str) and value:
+                        algo = value
+                if isinstance(value, str) and ("hash" in lower or "measurement" in lower):
+                    if _HEX_RE.match(value.strip()):
+                        return value.strip()
+                found = walk(value)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = walk(item)
+                if found:
+                    return found
+        return ""
+
+    return walk(detail), algo
+
+
+def _match_measured(name: str, measured: dict[str, dict]) -> Optional[dict]:
+    if name in measured:
+        return measured[name]
+    low = name.lower()
+    for key, value in measured.items():
+        kl = key.lower()
+        if kl and (kl in low or low in kl):
+            return value
+    return None
 
 
 def parse_installed_from_racadm_xml(xml_text: str) -> list[FirmwareEntry]:

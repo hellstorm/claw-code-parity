@@ -7,7 +7,14 @@ const resultsCard = document.getElementById("results-card");
 const resultsBody = document.getElementById("results-body");
 const summary = document.getElementById("summary");
 
-let counts = { ok: 0, bad: 0, unknown: 0 };
+let counts = {
+  // Axe intégrité (sécurité)
+  ok: 0,
+  compromised: 0,
+  unverifiable: 0,
+  // Axe mise à jour
+  available: 0,
+};
 
 function setStatus(message, isError) {
   statusPanel.hidden = false;
@@ -28,7 +35,7 @@ function setStatus(message, isError) {
 function resetResults() {
   resultsBody.innerHTML = "";
   summary.innerHTML = "";
-  counts = { ok: 0, bad: 0, unknown: 0 };
+  counts = { ok: 0, compromised: 0, unverifiable: 0, available: 0 };
   resultsCard.hidden = true;
 }
 
@@ -39,45 +46,77 @@ function escapeHtml(value) {
 }
 
 function renderSummary() {
-  summary.innerHTML =
-    `<span class="pill ok">✅ Intègres : ${counts.ok}</span>` +
-    `<span class="pill bad">⛔ Non conformes : ${counts.bad}</span>` +
-    `<span class="pill unknown">❔ Inconnus : ${counts.unknown}</span>`;
+  // La sécurité (intégrité) d'abord ; la disponibilité de mise à jour ensuite.
+  let html = '<div class="summary-group"><span class="summary-title">Intégrité</span>';
+  html += `<span class="pill ok">🟢 Intègres : ${counts.ok}</span>`;
+  html += `<span class="pill bad alert">🔴 Compromis : ${counts.compromised}</span>`;
+  html += `<span class="pill unknown">⚪ Non vérifiables : ${counts.unverifiable}</span></div>`;
+  html += '<div class="summary-group"><span class="summary-title">Mise à jour</span>';
+  html += `<span class="pill info">🔵 Disponibles : ${counts.available}</span></div>`;
+  summary.innerHTML = html;
 }
 
-function statusClass(status) {
+function integrityClass(status) {
   if (status === "ok") return "ok";
-  if (status === "outdated") return "bad";
+  if (status === "compromised") return "bad";
   return "unknown";
+}
+
+function integrityBadge(row) {
+  const cls = integrityClass(row.integrity);
+  let title = "";
+  if (row.integrity === "compromised") {
+    title =
+      "Même version, hash différent de la référence.\n" +
+      "mesuré : " + (row.measured_hash || "—") + "\n" +
+      "attendu : " + (row.expected_hash || "—");
+  } else if (row.integrity === "ok") {
+    title = "Hash conforme à la baseline (" + (row.hash_algorithm || "hash") + ").";
+  } else {
+    title = "Pas de hash mesuré et/ou pas d'empreinte de référence à version égale.";
+  }
+  return `<span class="badge ${cls}" title="${escapeHtml(title)}">${escapeHtml(row.integrity_label)}</span>`;
+}
+
+function updateCell(row) {
+  if (row.update === "available") {
+    return `<span class="badge info">${escapeHtml(row.official_version)} dispo.</span>`;
+  }
+  if (row.update === "current") {
+    return `<span class="badge neutral">À jour</span>`;
+  }
+  return `<span class="no-action">—</span>`;
+}
+
+function actionCell(row) {
+  if (row.update === "available" && row.download_url) {
+    const t = row.package_hash ? `MD5 du paquet : ${row.package_hash}` : "";
+    return `<a class="update-btn" href="${escapeHtml(row.download_url)}" target="_blank" rel="noopener" title="${escapeHtml(t)}">⬇ Télécharger la mise à jour</a>`;
+  }
+  return `<span class="no-action">—</span>`;
 }
 
 function addRow(row) {
   resultsCard.hidden = false;
-  const cls = statusClass(row.status);
-  if (cls === "ok") counts.ok++;
-  else if (cls === "bad") counts.bad++;
-  else counts.unknown++;
+  const icls = integrityClass(row.integrity);
+  if (icls === "ok") counts.ok++;
+  else if (icls === "bad") counts.compromised++;
+  else counts.unverifiable++;
+  if (row.update === "available") counts.available++;
 
   const tr = document.createElement("tr");
-  tr.className = cls === "bad" ? "row-bad" : cls === "ok" ? "row-ok" : "";
-
-  const action =
-    row.status === "outdated" && row.download_url
-      ? `<a class="update-btn" href="${escapeHtml(row.download_url)}" target="_blank" rel="noopener">⬇ Télécharger la mise à jour</a>`
-      : `<span class="no-action">—</span>`;
-
-  const hash = row.reference_hash
-    ? `<span class="hash" title="${escapeHtml(row.reference_hash)}">${escapeHtml(row.reference_hash)}</span>`
-    : `<span class="no-action">—</span>`;
+  // La couleur de la ligne suit l'axe intégrité (sécurité), prioritaire.
+  tr.className = "row-" + icls;
+  if (row.integrity === "compromised") tr.classList.add("row-alert");
 
   tr.innerHTML =
     `<td>${escapeHtml(row.name)}</td>` +
     `<td>${escapeHtml(row.component_type || "—")}</td>` +
     `<td>${escapeHtml(row.installed_version || "—")}</td>` +
+    `<td class="col-integrity">${integrityBadge(row)}</td>` +
     `<td>${escapeHtml(row.official_version || "—")}</td>` +
-    `<td>${hash}</td>` +
-    `<td><span class="badge ${cls}">${escapeHtml(row.status_label)}</span></td>` +
-    `<td>${action}</td>`;
+    `<td>${updateCell(row)}</td>` +
+    `<td>${actionCell(row)}</td>`;
   resultsBody.appendChild(tr);
   renderSummary();
 }

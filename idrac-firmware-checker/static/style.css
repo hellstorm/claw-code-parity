@@ -12,6 +12,8 @@
   --bad-bg: rgba(239, 68, 68, 0.12);
   --unknown: #94a3b8;
   --unknown-bg: rgba(148, 163, 184, 0.12);
+  --info: #38bdf8;
+  --info-bg: rgba(56, 189, 248, 0.12);
 }
 
 * { box-sizing: border-box; }
@@ -126,10 +128,27 @@ button:disabled { opacity: .6; cursor: not-allowed; }
 
 .summary {
   display: flex;
-  gap: 1rem;
+  gap: 1.5rem;
   flex-wrap: wrap;
+  align-items: center;
   margin-bottom: 1rem;
   font-size: .9rem;
+}
+.summary-group {
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-right: 1.25rem;
+  border-right: 1px solid var(--border);
+}
+.summary-group:last-child { border-right: none; padding-right: 0; }
+.summary-title {
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  font-weight: 700;
 }
 .pill {
   padding: .3rem .7rem;
@@ -139,6 +158,8 @@ button:disabled { opacity: .6; cursor: not-allowed; }
 .pill.ok { background: var(--ok-bg); color: var(--ok); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); }
 .pill.unknown { background: var(--unknown-bg); color: var(--unknown); }
+.pill.info { background: var(--info-bg); color: var(--info); }
+.pill.alert { box-shadow: 0 0 0 1px var(--bad); }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .88rem; }
@@ -149,9 +170,14 @@ th, td {
   vertical-align: middle;
 }
 th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
-/* Versions, état et action restent sur une ligne ; le nom peut se replier. */
-td:nth-child(3), td:nth-child(4), td:nth-child(6), td:nth-child(7) { white-space: nowrap; }
+/* Versions, intégrité, mise à jour et action sur une ligne ; le nom se replie. */
+td:nth-child(3), td:nth-child(4), td:nth-child(5),
+td:nth-child(6), td:nth-child(7) { white-space: nowrap; }
 tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+/* Colonne Intégrité mise en avant (axe de sécurité primordial). */
+.col-integrity { background: rgba(56, 189, 248, 0.04); }
+th.col-integrity { color: var(--text); }
 
 .hash {
   font-family: ui-monospace, monospace;
@@ -186,10 +212,19 @@ tbody tr:hover { background: rgba(255,255,255,0.02); }
 .badge.bad::before { background: var(--bad); }
 .badge.unknown { background: var(--unknown-bg); color: var(--unknown); }
 .badge.unknown::before { background: var(--unknown); }
+.badge.info { background: var(--info-bg); color: var(--info); }
+.badge.info::before { background: var(--info); }
+.badge.neutral { background: var(--unknown-bg); color: var(--muted); }
+.badge.neutral::before { background: var(--muted); }
 
-.row-ok { }
-.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+/* Bordure gauche = état d'intégrité (sécurité). */
 .row-ok td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+.row-unknown td:first-child { box-shadow: inset 3px 0 0 var(--unknown); }
+/* Un firmware compromis : ligne signalée en rouge. */
+.row-alert { background: var(--bad-bg) !important; }
+.row-alert:hover { background: rgba(239, 68, 68, 0.18) !important; }
+.row-alert td:first-child { font-weight: 600; }
 
 .update-btn {
   background: var(--bad);

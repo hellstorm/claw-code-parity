@@ -1,76 +1,57 @@
-"""Rapprochement firmware installé ↔ catalogue Dell, et calcul d'intégrité.
+"""Rapprochement firmware installé ↔ catalogue Dell + baseline, sur **deux
+axes distincts et indépendants** :
 
-Le firmware remonté par l'iDRAC porte un nom (« BIOS », « iDRAC », « NIC
-Broadcom … ») et une version. Le catalogue liste des paquets par identifiant de
-composant / nom de périphérique. Le rapprochement exact (par PCI ID) est
-complexe ; on procède ici par correspondance de nom et de type, en retenant, à
-noms comparables, la **version officielle la plus récente**.
+1. **Intégrité (hash)** — l'axe de sécurité, primordial. À *version égale*,
+   on compare le hash mesuré du firmware installé à l'empreinte de référence
+   connue-bonne (baseline) :
 
-Statut d'intégrité :
+   * ``ok``           — hash identique : *intègre*.
+   * ``compromised``  — même version, hash différent : **compromis** (alerte).
+   * ``unverifiable`` — pas de hash mesuré et/ou pas de référence : *non
+                        vérifiable*.
 
-* ``ok``      — la version installée == dernière version officielle : *intègre*.
-* ``outdated``— une version officielle plus récente existe : *non conforme*,
-                un bouton de mise à jour est proposé.
-* ``unknown`` — aucun paquet correspondant trouvé dans le catalogue.
+2. **Mise à jour (version)** — informatif. On compare la version installée à
+   la dernière version officielle du catalogue :
 
-Rappel : le catalogue ne fournit pas de hash du firmware *installé*. Le
-``hashMD5`` affiché est celui du paquet officiel (référence de téléchargement).
-La conformité repose donc sur la comparaison de version.
+   * ``current``   — à jour.
+   * ``available`` — une version plus récente existe (bouton de mise à jour).
+   * ``unknown``   — aucun paquet correspondant au catalogue.
+
+Les deux états sont calculés séparément : un firmware peut être **intègre mais
+à mettre à jour**, ou **à jour mais compromis** (cas le plus grave). L'axe
+intégrité prime sur l'axe mise à jour dans la hiérarchie de sécurité.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Optional
 
+from baseline import Baseline, BaselineEntry
 from catalog import CatalogComponent
+from matching import normalize_hash, similarity, version_ge, versions_equal
 
-STATUS_OK = "ok"
-STATUS_OUTDATED = "outdated"
-STATUS_UNKNOWN = "unknown"
+# --- Axe intégrité (sécurité) ------------------------------------------------
+INTEGRITY_OK = "ok"
+INTEGRITY_COMPROMISED = "compromised"
+INTEGRITY_UNVERIFIABLE = "unverifiable"
 
-_STOPWORDS = {
-    "firmware",
-    "controller",
-    "adapter",
-    "card",
-    "for",
-    "dell",
-    "the",
-    "and",
-    "network",
-    "device",
-    "system",
+INTEGRITY_LABELS = {
+    INTEGRITY_OK: "Intègre",
+    INTEGRITY_COMPROMISED: "Compromis",
+    INTEGRITY_UNVERIFIABLE: "Non vérifiable",
 }
 
+# --- Axe mise à jour (version) ----------------------------------------------
+UPDATE_CURRENT = "current"
+UPDATE_AVAILABLE = "available"
+UPDATE_UNKNOWN = "unknown"
 
-def _tokens(text: str) -> set[str]:
-    words = re.findall(r"[a-z0-9]+", text.lower())
-    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
-
-
-def _similarity(a: str, b: str) -> float:
-    ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
-        return 0.0
-    inter = ta & tb
-    union = ta | tb
-    return len(inter) / len(union)
-
-
-def _version_key(version: str) -> tuple:
-    """Clé de tri d'une version, robuste aux formats Dell (``2.15.0``,
-    ``A11``, ``21.85.22.30``…)."""
-    parts = re.split(r"[.\-_]", version.strip())
-    key: list[tuple[int, object]] = []
-    for part in parts:
-        m = re.match(r"^(\d+)$", part)
-        if m:
-            key.append((0, int(m.group(1))))
-        else:
-            key.append((1, part.lower()))
-    return tuple(key)
+UPDATE_LABELS = {
+    UPDATE_CURRENT: "À jour",
+    UPDATE_AVAILABLE: "Mise à jour disponible",
+    UPDATE_UNKNOWN: "Inconnu",
+}
 
 
 @dataclass
@@ -79,8 +60,14 @@ class ComparisonRow:
     component_type: str
     installed_version: str
     official_version: str
-    reference_hash: str
-    status: str
+    # Axe intégrité
+    integrity: str
+    measured_hash: str
+    expected_hash: str
+    hash_algorithm: str
+    # Axe mise à jour
+    update: str
+    package_hash: str
     download_url: str
     matched: bool
 
@@ -90,19 +77,17 @@ class ComparisonRow:
             "component_type": self.component_type,
             "installed_version": self.installed_version,
             "official_version": self.official_version,
-            "reference_hash": self.reference_hash,
-            "status": self.status,
-            "status_label": STATUS_LABELS[self.status],
+            "integrity": self.integrity,
+            "integrity_label": INTEGRITY_LABELS[self.integrity],
+            "measured_hash": self.measured_hash,
+            "expected_hash": self.expected_hash,
+            "hash_algorithm": self.hash_algorithm,
+            "update": self.update,
+            "update_label": UPDATE_LABELS[self.update],
+            "package_hash": self.package_hash,
             "download_url": self.download_url,
             "matched": self.matched,
         }
-
-
-STATUS_LABELS = {
-    STATUS_OK: "Intègre",
-    STATUS_OUTDATED: "Non conforme",
-    STATUS_UNKNOWN: "Inconnu",
-}
 
 
 class CatalogIndex:
@@ -115,86 +100,98 @@ class CatalogIndex:
         best: Optional[CatalogComponent] = None
         best_score = 0.0
         for comp in self.components:
-            score = _similarity(name, comp.name)
+            score = similarity(name, comp.name)
             if component_type and comp.component_type:
                 if component_type.lower() == comp.component_type.lower():
                     score += 0.25
             if score > best_score:
                 best_score = score
                 best = comp
-        # Seuil : en dessous, on considère qu'il n'y a pas de correspondance.
         return best if best_score >= 0.34 else None
 
     def latest_for(self, name: str, component_type: str = "") -> Optional[CatalogComponent]:
-        """Version officielle la plus récente parmi les paquets comparables."""
         match = self.best_match(name, component_type)
         if match is None:
             return None
-        # Regroupe tous les paquets « proches » du meilleur match et garde la
-        # version la plus haute.
-        candidates = [
-            c
-            for c in self.components
-            if _similarity(match.name, c.name) >= 0.6
-        ] or [match]
-        return max(candidates, key=lambda c: _version_key(c.version))
+        candidates = [c for c in self.components if similarity(match.name, c.name) >= 0.6] or [match]
+        from matching import version_key
+
+        return max(candidates, key=lambda c: version_key(c.version))
 
 
-def compare_inventory(
-    installed: list,
-    catalog: list[CatalogComponent],
-) -> list[ComparisonRow]:
-    """Produit une ligne de comparaison par firmware installé."""
-    index = CatalogIndex(catalog)
-    rows: list[ComparisonRow] = []
-    for entry in installed:
-        name = getattr(entry, "name", "") or ""
-        comp_type = getattr(entry, "component_type", "") or ""
-        installed_version = getattr(entry, "version", "") or ""
-        official = index.latest_for(name, comp_type)
-        rows.append(build_row(name, comp_type, installed_version, official))
-    return rows
+def compute_integrity(measured_hash: str, reference: Optional[BaselineEntry]) -> str:
+    """Statut d'intégrité. ``reference`` est déjà apparié à version égale."""
+    if not measured_hash or reference is None or not reference.hash:
+        return INTEGRITY_UNVERIFIABLE
+    if normalize_hash(measured_hash) == reference.normalized_hash:
+        return INTEGRITY_OK
+    return INTEGRITY_COMPROMISED
+
+
+def compute_update(installed_version: str, official: Optional[CatalogComponent]) -> str:
+    """Statut de mise à jour (axe version)."""
+    if official is None or not official.version or not installed_version:
+        return UPDATE_UNKNOWN
+    if versions_equal(installed_version, official.version) or version_ge(
+        installed_version, official.version
+    ):
+        return UPDATE_CURRENT
+    return UPDATE_AVAILABLE
 
 
 def build_row(
     name: str,
     component_type: str,
     installed_version: str,
+    measured_hash: str,
+    hash_algorithm: str,
     official: Optional[CatalogComponent],
+    reference: Optional[BaselineEntry],
 ) -> ComparisonRow:
-    if official is None:
-        return ComparisonRow(
-            name=name,
-            component_type=component_type,
-            installed_version=installed_version,
-            official_version="—",
-            reference_hash="",
-            status=STATUS_UNKNOWN,
-            download_url="",
-            matched=False,
-        )
-
-    status = _status_for(installed_version, official.version)
+    integrity = compute_integrity(measured_hash, reference)
+    update = compute_update(installed_version, official)
     return ComparisonRow(
         name=name,
-        component_type=component_type or official.component_type,
+        component_type=component_type or (official.component_type if official else ""),
         installed_version=installed_version,
-        official_version=official.version,
-        reference_hash=official.hash_md5,
-        status=status,
-        download_url=official.download_url if status == STATUS_OUTDATED else "",
-        matched=True,
+        official_version=official.version if official else "—",
+        integrity=integrity,
+        measured_hash=measured_hash,
+        expected_hash=reference.hash if reference else "",
+        hash_algorithm=hash_algorithm or (reference.algorithm if reference else ""),
+        update=update,
+        package_hash=official.hash_md5 if official else "",
+        download_url=official.download_url if update == UPDATE_AVAILABLE else "",
+        matched=official is not None,
     )
 
 
-def _status_for(installed_version: str, official_version: str) -> str:
-    if not installed_version or not official_version:
-        return STATUS_UNKNOWN
-    if installed_version.strip().lower() == official_version.strip().lower():
-        return STATUS_OK
-    inst = _version_key(installed_version)
-    off = _version_key(official_version)
-    # Version installée >= officielle -> considérée conforme (à jour).
-    if inst >= off:
-        return STATUS_OK
-    return STATUS_OUTDATED
+def compare_inventory(
+    installed: list,
+    catalog: list[CatalogComponent],
+    baseline: Optional[Baseline] = None,
+) -> list[ComparisonRow]:
+    """Produit une ligne de comparaison (2 axes) par firmware installé."""
+    index = CatalogIndex(catalog)
+    base = baseline or Baseline([])
+    rows: list[ComparisonRow] = []
+    for entry in installed:
+        name = getattr(entry, "name", "") or ""
+        comp_type = getattr(entry, "component_type", "") or ""
+        installed_version = getattr(entry, "version", "") or ""
+        measured_hash = getattr(entry, "measured_hash", "") or ""
+        hash_algorithm = getattr(entry, "hash_algorithm", "") or ""
+        official = index.latest_for(name, comp_type)
+        reference = base.reference_for(name, installed_version)
+        rows.append(
+            build_row(
+                name,
+                comp_type,
+                installed_version,
+                measured_hash,
+                hash_algorithm,
+                official,
+                reference,
+            )
+        )
+    return rows
